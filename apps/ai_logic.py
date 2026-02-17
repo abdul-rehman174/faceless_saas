@@ -42,7 +42,6 @@ def assemble_video(scenes_data, reel_id: str):
     try:
         for scene in scenes_data:
             audio = AudioFileClip(scene['audio_url'].lstrip('/'))
-            # MoviePy v2.x
             img = (ImageClip(scene['image_url'].lstrip('/'))
                    .with_duration(audio.duration).with_audio(audio))
             clips.append(img)
