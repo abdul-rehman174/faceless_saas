@@ -6,13 +6,11 @@ import uuid
 class Reel(Base):
     __tablename__ = "reels"
 
-    # Match Supabase UUID primary key
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     topic = Column(String)
-    script_data = Column(JSONB) # Stores the script structure
+    script_data = Column(JSONB)
 
-    # Persistent storage paths
     video_url = Column(String, nullable=True)
-    generated_assets = Column(JSONB, default=[]) # Stores image/audio list
+    generated_assets = Column(JSONB, default=[])
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
