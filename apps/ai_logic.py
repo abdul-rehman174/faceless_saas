@@ -10,7 +10,7 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 def generate_reel_script(topic: str):
     response = client.models.generate_content(
-        model="gemini-2.0-flash", contents=f"Topic: {topic}",
+        model="gemini-2.5-flash", contents=f"Topic: {topic}",
         config=types.GenerateContentConfig(
             system_instruction="Create a viral reel script in JSON.",
             response_mime_type="application/json", response_schema=ReelScript))
