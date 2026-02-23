@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from apps import database, schemas
+from apps import database
 
 
 def save_reel_script(db: Session, topic: str, script_data: dict):
