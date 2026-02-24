@@ -51,7 +51,6 @@ async def update_assets(reel_id: str, assets: List[SceneAsset], db: Session = De
 
 @app.post("/assemble-video/{reel_id}")
 async def build_video(reel_id: str, assets: List[SceneAsset], db: Session = Depends(get_db)):
-    # CACHE CHECK: If video exists, don't re-render
     final_path = f"static/videos/final_{reel_id}.mp4"
     if os.path.exists(final_path):
         return {"video_url": f"/{final_path}"}
