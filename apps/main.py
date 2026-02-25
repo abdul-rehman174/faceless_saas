@@ -58,7 +58,8 @@ async def build_video(reel_id: str, assets: List[SceneAsset], db: Session = Depe
     scenes_list = [a.model_dump() for a in assets]
     video_url = assemble_video(scenes_list, reel_id)
     if video_url:
-        db.execute(text("UPDATE reels SET video_url = :url WHERE id = :id"), {"url": video_url, "id": reel_id})
+        db.execute(text("UPDATE reels SET video_url = :url WHERE id = :id"),
+                   {"url": video_url, "id": reel_id})
         db.commit()
         return {"video_url": video_url}
     raise HTTPException(status_code=500)
