@@ -1,52 +1,100 @@
-import os, requests, edge_tts
+from __future__ import annotations
+
+import uuid
+from typing import Iterable
+
+import edge_tts
+import requests
 from google import genai
 from google.genai import types
-from dotenv import load_dotenv
+from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
+
+from apps.config import get_settings
+from apps.logger import get_logger
 from apps.schemas import ReelScript
-from moviepy import ImageClip, AudioFileClip, concatenate_videoclips, TextClip
 
-load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+logger = get_logger(__name__)
+settings = get_settings()
+_client = genai.Client(api_key=settings.gemini_api_key)
 
-def generate_reel_script(topic: str):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", contents=f"Topic: {topic}",
+
+SCRIPT_SYSTEM_INSTRUCTION = (
+    "You are a short-form video scriptwriter. Produce a vertical 9:16 reel script "
+    "in JSON. Keep it factual, punchy, and engaging. Use 5-7 scenes. Each scene "
+    "must include a vivid `image_prompt` and a one-to-two-sentence `narration`."
+)
+
+
+def generate_reel_script(topic: str) -> ReelScript:
+    logger.info("Generating script for topic: %s", topic)
+    response = _client.models.generate_content(
+        model=settings.gemini_model,
+        contents=f"Topic: {topic}",
         config=types.GenerateContentConfig(
-            system_instruction="Create a viral reel script in JSON.",
-            response_mime_type="application/json", response_schema=ReelScript))
+            system_instruction=SCRIPT_SYSTEM_INSTRUCTION,
+            response_mime_type="application/json",
+            response_schema=ReelScript,
+        ),
+    )
+    if response.parsed is None:
+        logger.error("Gemini returned no parsed script for topic %s", topic)
+        raise RuntimeError("Failed to generate script")
     return response.parsed
 
-def generate_image_from_prompt(prompt: str, reel_id: str, scene_index: int):
-    token = os.getenv("HF_TOKEN")
-    API_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
-    headers = {"Authorization": f"Bearer {token}"}
+
+def generate_image_from_prompt(prompt: str, reel_id: uuid.UUID | str, scene_index: int) -> str:
+    headers = {"Authorization": f"Bearer {settings.hf_token}"}
     payload = {"inputs": f"{prompt}, 8k, vertical 9:16"}
-    res = requests.post(API_URL, headers=headers, json=payload)
-    if res.status_code == 200:
-        path = f"static/images/reel_{reel_id}_{scene_index}.png"
-        os.makedirs("static/images", exist_ok=True)
-        with open(path, "wb") as f: f.write(res.content)
-        return f"/{path}"
-    return None
+    logger.info("Requesting image: reel=%s scene=%s", reel_id, scene_index)
+    res = requests.post(settings.flux_model_url, headers=headers, json=payload, timeout=120)
+    if res.status_code != 200:
+        logger.error("FLUX returned %s: %s", res.status_code, res.text[:200])
+        raise RuntimeError(f"Image generation failed: HTTP {res.status_code}")
 
-async def generate_audio(text: str, reel_id: str, scene_index: int):
-    path = f"static/audio/reel_{reel_id}_{scene_index}.mp3"
-    os.makedirs("static/audio", exist_ok=True)
-    await edge_tts.Communicate(text, "en-US-ChristopherNeural").save(path)
-    return f"/{path}"
+    settings.images_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.images_dir / f"reel_{reel_id}_{scene_index}.png"
+    path.write_bytes(res.content)
+    return f"/{path.as_posix()}"
 
-def assemble_video(scenes_data, reel_id: str):
+
+async def generate_audio(text: str, reel_id: uuid.UUID | str, scene_index: int) -> str:
+    settings.audio_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.audio_dir / f"reel_{reel_id}_{scene_index}.mp3"
+    logger.info("Generating audio: reel=%s scene=%s", reel_id, scene_index)
+    await edge_tts.Communicate(text, settings.tts_voice).save(str(path))
+    return f"/{path.as_posix()}"
+
+
+def assemble_video(scenes_data: Iterable[dict], reel_id: uuid.UUID | str) -> str:
+    settings.videos_dir.mkdir(parents=True, exist_ok=True)
+    final_path = settings.videos_dir / f"final_{reel_id}.mp4"
+
     clips = []
-    final_path = f"static/videos/final_{reel_id}.mp4"
-    os.makedirs("static/videos", exist_ok=True)
+    audio_handles: list[AudioFileClip] = []
     try:
         for scene in scenes_data:
-            audio = AudioFileClip(scene['audio_url'].lstrip('/'))
-            img = (ImageClip(scene['image_url'].lstrip('/'))
-                   .with_duration(audio.duration).with_audio(audio))
-            clips.append(img)
+            if not scene.get("image_url") or not scene.get("audio_url"):
+                raise ValueError(f"Scene {scene.get('scene_number')} missing assets")
+            audio = AudioFileClip(scene["audio_url"].lstrip("/"))
+            audio_handles.append(audio)
+            clip = (
+                ImageClip(scene["image_url"].lstrip("/"))
+                .with_duration(audio.duration)
+                .with_audio(audio)
+            )
+            clips.append(clip)
+
         final = concatenate_videoclips(clips, method="compose")
-        final.write_videofile(final_path, fps=24, codec="libx264")
-        return f"/{final_path}"
-    except Exception as e:
-        print(f"Assembly Error: {e}"); return None
+        final.write_videofile(
+            str(final_path),
+            fps=24,
+            codec="libx264",
+            audio_codec="aac",
+            logger=None,
+        )
+        return f"/{final_path.as_posix()}"
+    finally:
+        for clip in clips:
+            clip.close()
+        for audio in audio_handles:
+            audio.close()
