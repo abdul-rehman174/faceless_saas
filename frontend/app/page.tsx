@@ -1,141 +1,223 @@
 "use client";
-import { useState, useEffect } from "react";
+
+import { useEffect, useMemo, useState } from "react";
+import { API_BASE, api } from "./api";
+import type { Reel, ReelScript, SceneAssetMap } from "./types";
+
+function parseScript(reel: Reel): ReelScript {
+  return typeof reel.script_data === "string"
+    ? (JSON.parse(reel.script_data) as ReelScript)
+    : reel.script_data;
+}
 
 export default function Home() {
   const [topic, setTopic] = useState("");
-  const [reels, setReels] = useState([]);
-  const [selectedReel, setSelectedReel] = useState<any>(null);
-  const [sceneImages, setSceneImages] = useState<any>({});
-  const [sceneAudio, setSceneAudio] = useState<any>({});
+  const [reels, setReels] = useState<Reel[]>([]);
+  const [selectedReel, setSelectedReel] = useState<Reel | null>(null);
+  const [sceneImages, setSceneImages] = useState<SceneAssetMap>({});
+  const [sceneAudio, setSceneAudio] = useState<SceneAssetMap>({});
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingCreate, setLoadingCreate] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
-
-  const API_BASE = "http://127.0.0.1:8000";
+  const [pendingImages, setPendingImages] = useState<Record<number, boolean>>({});
+  const [pendingAudio, setPendingAudio] = useState<Record<number, boolean>>({});
+  const [error, setError] = useState<string | null>(null);
 
   const fetchReels = async () => {
-    const res = await fetch(`${API_BASE}/reels`);
-    setReels(await res.json());
+    try {
+      setReels(await api.listReels());
+    } catch (e) {
+      setError((e as Error).message);
+    }
   };
 
-  useEffect(() => { fetchReels(); }, []);
+  useEffect(() => {
+    fetchReels();
+  }, []);
 
   useEffect(() => {
-    if (selectedReel) {
-      const assets = selectedReel.generated_assets || [];
-      const imgs: any = {}; const auds: any = {};
-      assets.forEach((a: any) => {
-        if (a.image_url) imgs[a.scene_number] = a.image_url;
-        if (a.audio_url) auds[a.scene_number] = a.audio_url;
-      });
-      setSceneImages(imgs); setSceneAudio(auds);
-
-      // Load video if it exists in the database
-      if (selectedReel.video_url) {
-        setVideoUrl(`${API_BASE}${selectedReel.video_url}`);
-      } else {
-        setVideoUrl(null);
-      }
-    }
+    if (!selectedReel) return;
+    const imgs: SceneAssetMap = {};
+    const auds: SceneAssetMap = {};
+    (selectedReel.generated_assets || []).forEach((a) => {
+      if (a.image_url) imgs[a.scene_number] = a.image_url;
+      if (a.audio_url) auds[a.scene_number] = a.audio_url;
+    });
+    setSceneImages(imgs);
+    setSceneAudio(auds);
+    setVideoUrl(selectedReel.video_url ? `${API_BASE}${selectedReel.video_url}` : null);
   }, [selectedReel]);
 
-  const syncToDB = async (imgs: any, auds: any) => {
-    // FIX: Safely handle JSON objects from Supabase
-    const script = typeof selectedReel.script_data === 'string'
-      ? JSON.parse(selectedReel.script_data) : selectedReel.script_data;
+  const script = useMemo(
+    () => (selectedReel ? parseScript(selectedReel) : null),
+    [selectedReel]
+  );
 
-    const assets = script.scenes.map((s: any) => ({
+  const syncToDB = async (imgs: SceneAssetMap, auds: SceneAssetMap) => {
+    if (!selectedReel || !script) return;
+    const assets = script.scenes.map((s) => ({
       scene_number: s.scene_number,
-      image_url: imgs[s.scene_number] || null,
-      audio_url: auds[s.scene_number] || null
+      image_url: imgs[s.scene_number] ?? null,
+      audio_url: auds[s.scene_number] ?? null,
     }));
+    try {
+      await api.updateAssets(selectedReel.id, assets);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
-    await fetch(`${API_BASE}/update-assets/${selectedReel.id}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(assets)
-    });
+  const handleCreate = async () => {
+    if (!topic.trim() || loadingCreate) return;
+    setLoadingCreate(true);
+    setError(null);
+    try {
+      await api.createReel(topic.trim());
+      setTopic("");
+      await fetchReels();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoadingCreate(false);
+    }
+  };
+
+  const handleGenerateImage = async (sceneNumber: number, prompt: string) => {
+    if (!selectedReel || pendingImages[sceneNumber]) return;
+    setPendingImages((p) => ({ ...p, [sceneNumber]: true }));
+    setError(null);
+    try {
+      const { image_url } = await api.generateImage(selectedReel.id, sceneNumber, prompt);
+      const next = { ...sceneImages, [sceneNumber]: image_url };
+      setSceneImages(next);
+      await syncToDB(next, sceneAudio);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPendingImages((p) => ({ ...p, [sceneNumber]: false }));
+    }
+  };
+
+  const handleGenerateAudio = async (sceneNumber: number, narration: string) => {
+    if (!selectedReel || pendingAudio[sceneNumber]) return;
+    setPendingAudio((p) => ({ ...p, [sceneNumber]: true }));
+    setError(null);
+    try {
+      const { audio_url } = await api.generateAudio(selectedReel.id, sceneNumber, narration);
+      const next = { ...sceneAudio, [sceneNumber]: audio_url };
+      setSceneAudio(next);
+      await syncToDB(sceneImages, next);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPendingAudio((p) => ({ ...p, [sceneNumber]: false }));
+    }
   };
 
   const handleAssemble = async () => {
-    if (isRendering) return;
+    if (!selectedReel || !script || isRendering) return;
     setIsRendering(true);
-    setVideoUrl(null); // Clear old video before rendering
-
+    setVideoUrl(null);
+    setError(null);
     try {
-      const script = typeof selectedReel.script_data === 'string' ? JSON.parse(selectedReel.script_data) : selectedReel.script_data;
-      const assets = script.scenes.map((s: any) => ({
+      const assets = script.scenes.map((s) => ({
         scene_number: s.scene_number,
-        image_url: sceneImages[s.scene_number],
-        audio_url: sceneAudio[s.scene_number]
+        image_url: sceneImages[s.scene_number] ?? null,
+        audio_url: sceneAudio[s.scene_number] ?? null,
       }));
-
-      const res = await fetch(`${API_BASE}/assemble-video/${selectedReel.id}`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(assets)
-      });
-
-      const data = await res.json();
-
-      if (data.video_url) {
-        // ADD TIMESTAMP TO BYPASS CACHE
-        const freshUrl = `${API_BASE}${data.video_url}?t=${new Date().getTime()}`;
-        setVideoUrl(freshUrl);
+      const missing = assets.find((a) => !a.image_url || !a.audio_url);
+      if (missing) {
+        throw new Error(`Scene ${missing.scene_number} is missing an image or audio.`);
       }
-    } catch (error) {
-      console.error("Assembly failed", error);
+      const { video_url } = await api.assembleVideo(selectedReel.id, assets);
+      setVideoUrl(`${API_BASE}${video_url}?t=${Date.now()}`);
+      await fetchReels();
+    } catch (e) {
+      setError((e as Error).message);
     } finally {
       setIsRendering(false);
-      fetchReels();
     }
   };
 
   return (
-    <main className="p-10 bg-black min-h-screen text-white font-sans">
-      <h1 className="text-4xl font-black mb-10 italic text-blue-500 tracking-tighter">AI REEL FACTORY</h1>
+    <main className="px-6 py-8 bg-black min-h-screen text-white font-sans max-w-6xl mx-auto">
+      <h1 className="text-2xl font-black mb-6 italic text-blue-500 tracking-tighter">
+        AI REEL FACTORY
+      </h1>
 
-      {/* Create Section */}
-      <div className="flex gap-4 mb-12 bg-gray-900 p-2 rounded-2xl border border-gray-800">
-        <input className="bg-transparent p-4 flex-1 outline-none" placeholder="Enter topic..." value={topic} onChange={e => setTopic(e.target.value)} />
-        <button onClick={async () => { setLoading(true); await fetch(`${API_BASE}/generate-reel?topic=${topic}`, {method:"POST"}); fetchReels(); setLoading(false); }} className="bg-blue-600 px-8 rounded-xl font-bold">
-          {loading ? "..." : "Create"}
+      <div className="flex gap-2 mb-4 bg-gray-900 p-1.5 rounded-xl border border-gray-800">
+        <input
+          className="bg-transparent px-3 py-2 flex-1 outline-none text-sm"
+          placeholder="Enter topic..."
+          value={topic}
+          onChange={(e) => setTopic(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+          disabled={loadingCreate}
+        />
+        <button
+          onClick={handleCreate}
+          disabled={loadingCreate || !topic.trim()}
+          className="bg-blue-600 hover:bg-blue-500 px-5 py-2 rounded-lg font-semibold text-sm disabled:opacity-50 transition"
+        >
+          {loadingCreate ? "Creating..." : "Create"}
         </button>
       </div>
 
-      {/* Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {reels.map((r: any) => (
-          <div key={r.id} onClick={() => setSelectedReel(r)} className="bg-gray-900 p-6 rounded-3xl border border-gray-800 cursor-pointer hover:border-blue-500 transition">
-            <h3 className="font-bold text-xl truncate">{r.topic}</h3>
-            <p className="text-xs text-gray-500 mt-2">{r.video_url ? "✅ READY" : "📝 DRAFT"}</p>
+      {error && (
+        <div className="mb-4 bg-red-900/40 border border-red-700 text-red-200 px-3 py-2 rounded-lg text-xs">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {reels.map((r) => (
+          <div
+            key={r.id}
+            onClick={() => setSelectedReel(r)}
+            className="bg-gray-900 p-4 rounded-xl border border-gray-800 cursor-pointer hover:border-blue-500 transition"
+          >
+            <h3 className="font-semibold text-sm truncate">{r.topic}</h3>
+            <p className="text-[10px] uppercase tracking-wider text-gray-500 mt-1.5">
+              {r.video_url ? "Ready" : "Draft"}
+            </p>
           </div>
         ))}
       </div>
 
-      {/* Modal Editor */}
-      {selectedReel && (
-        <div className="fixed inset-0 bg-black/98 z-50 p-10 overflow-auto">
-          <div className="max-w-4xl mx-auto">
-            <button onClick={() => setSelectedReel(null)} className="text-5xl font-light mb-10">×</button>
+      {selectedReel && script && (
+        <div className="fixed inset-0 bg-black/95 z-50 p-6 overflow-auto">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold truncate">{selectedReel.topic}</h2>
+              <button
+                onClick={() => setSelectedReel(null)}
+                className="text-2xl font-light text-gray-400 hover:text-white w-8 h-8 flex items-center justify-center"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
 
-            {/* IMPROVED VIDEO PLAYER SECTION */}
-            <div className="mb-10 text-center flex flex-col items-center">
+            <div className="mb-6 flex flex-col items-center">
               {videoUrl ? (
-                <div className="relative group">
+                <>
                   <video
-                    key={videoUrl} // Force re-render of component when URL changes
+                    key={videoUrl}
                     src={videoUrl}
                     controls
-                    className="w-72 rounded-3xl shadow-2xl border-4 border-blue-600"
+                    className="w-56 rounded-xl shadow-xl border border-blue-600"
                   />
-                  <a href={videoUrl} download className="mt-4 inline-block bg-blue-600 px-8 py-3 rounded-full font-bold hover:bg-blue-500 transition">
+                  <a
+                    href={videoUrl}
+                    download
+                    className="mt-3 inline-block bg-blue-600 hover:bg-blue-500 px-5 py-1.5 rounded-full text-sm font-semibold transition"
+                  >
                     Download MP4
                   </a>
-                </div>
+                </>
               ) : (
-                <div className="w-72 h-[480px] bg-gray-900 rounded-3xl border-2 border-dashed border-gray-700 flex items-center justify-center text-gray-500">
-                  {isRendering ? "Rendering your masterpiece..." : "No video built yet"}
+                <div className="w-56 aspect-[9/16] bg-gray-900 rounded-xl border border-dashed border-gray-700 flex items-center justify-center text-gray-500 text-center px-4 text-xs">
+                  {isRendering ? "Rendering..." : "No video built yet"}
                 </div>
               )}
             </div>
@@ -143,40 +225,69 @@ export default function Home() {
             <button
               onClick={handleAssemble}
               disabled={isRendering}
-              className="w-full py-6 bg-gradient-to-r from-green-600 to-blue-600 font-black text-2xl rounded-2xl mb-12 disabled:opacity-50 transition transform hover:scale-[1.01]"
+              className="w-full py-3 bg-gradient-to-r from-green-600 to-blue-600 hover:opacity-90 font-bold text-sm rounded-xl mb-6 disabled:opacity-50 transition"
             >
-              {isRendering ? "STITCHING SCENES..." : "BUILD FINAL VIDEO 🎬"}
+              {isRendering ? "STITCHING SCENES..." : "BUILD FINAL VIDEO"}
             </button>
 
-            {/* Scenes List */}
-            <div className="space-y-12">
-              {(() => {
-                const script = typeof selectedReel.script_data === 'string' ? JSON.parse(selectedReel.script_data) : selectedReel.script_data;
-                return script.scenes.map((s: any) => (
-                  <div key={s.scene_number} className="bg-gray-900/50 p-8 rounded-3xl border-l-8 border-blue-600">
-                    <p className="text-2xl italic mb-8 text-gray-100 leading-relaxed">"{s.narration}"</p>
-                    <div className="grid grid-cols-2 gap-6">
-                      {sceneImages[s.scene_number] ? <img src={`${API_BASE}${sceneImages[s.scene_number]}`} className="rounded-2xl border border-gray-800 aspect-[9/16] object-cover" /> :
-                        <button onClick={async () => {
-                          const res = await fetch(`${API_BASE}/generate-image?prompt=${encodeURIComponent(s.image_prompt)}&reel_id=${selectedReel.id}&scene_index=${s.scene_number}`, {method:"POST"});
-                          const data = await res.json();
-                          const up = {...sceneImages, [s.scene_number]: data.image_url};
-                          setSceneImages(up); syncToDB(up, sceneAudio);
-                        }} className="bg-purple-600 py-16 rounded-2xl font-bold text-xl">Generate Image</button>}
+            <div className="space-y-4">
+              {script.scenes.map((s) => {
+                const imgUrl = sceneImages[s.scene_number];
+                const audUrl = sceneAudio[s.scene_number];
+                const imgLoading = pendingImages[s.scene_number];
+                const audLoading = pendingAudio[s.scene_number];
+                return (
+                  <div
+                    key={s.scene_number}
+                    className="bg-gray-900/50 p-4 rounded-xl border-l-2 border-blue-600"
+                  >
+                    <div className="flex items-start gap-2 mb-3">
+                      <span className="text-[10px] uppercase tracking-wider text-blue-400 font-semibold mt-0.5">
+                        Scene {s.scene_number}
+                      </span>
+                    </div>
+                    <p className="text-sm italic mb-3 text-gray-200 leading-relaxed">
+                      &ldquo;{s.narration}&rdquo;
+                    </p>
+                    <div className="grid grid-cols-[auto_1fr] gap-3 items-start">
+                      {imgUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={`${API_BASE}${imgUrl}`}
+                          alt={s.image_prompt}
+                          className="rounded-lg border border-gray-800 w-24 aspect-[9/16] object-cover"
+                        />
+                      ) : (
+                        <button
+                          onClick={() => handleGenerateImage(s.scene_number, s.image_prompt)}
+                          disabled={imgLoading}
+                          className="bg-purple-600 hover:bg-purple-500 w-24 aspect-[9/16] rounded-lg font-semibold text-xs disabled:opacity-50 transition"
+                        >
+                          {imgLoading ? "..." : "Image"}
+                        </button>
+                      )}
 
-                      <div className="flex flex-col justify-end">
-                        {sceneAudio[s.scene_number] ? <audio src={`${API_BASE}${sceneAudio[s.scene_number]}`} controls className="w-full" /> :
-                          <button onClick={async () => {
-                            const res = await fetch(`${API_BASE}/generate-audio?text_input=${encodeURIComponent(s.narration)}&reel_id=${selectedReel.id}&scene_index=${s.scene_number}`, {method:"POST"});
-                            const data = await res.json();
-                            const up = {...sceneAudio, [s.scene_number]: data.audio_url};
-                            setSceneAudio(up); syncToDB(sceneImages, up);
-                          }} className="bg-blue-600 py-16 rounded-2xl font-bold text-xl">Voiceover</button>}
+                      <div className="flex flex-col justify-center min-h-full">
+                        {audUrl ? (
+                          <audio
+                            src={`${API_BASE}${audUrl}`}
+                            controls
+                            className="w-full h-9"
+                          />
+                        ) : (
+                          <button
+                            onClick={() => handleGenerateAudio(s.scene_number, s.narration)}
+                            disabled={audLoading}
+                            className="bg-blue-600 hover:bg-blue-500 py-2 rounded-lg font-semibold text-xs disabled:opacity-50 transition"
+                          >
+                            {audLoading ? "Generating..." : "Voiceover"}
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
-                ));
-              })()}
+                );
+              })}
             </div>
           </div>
         </div>
