@@ -1,5 +1,41 @@
-.env
-venv/
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editors
 .idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project artifacts (generated media)
+static/*
+!static/.gitkeep
+
+# MoviePy temp files
+*TEMP_MPY*
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.env
+frontend/.env.local
+
+# Logs
+*.log
